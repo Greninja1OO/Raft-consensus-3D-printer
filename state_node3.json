@@ -1,1 +1,32 @@
-{"term": 21, "voted_for": "node1"}
+{
+    "term": 25,
+    "voted_for": "node1",
+    "printers": {
+        "p1": {
+            "company": "Creality",
+            "model": "Ender 3"
+        },
+        "p2": {
+            "company": "Prussa",
+            "model": "i3 MK3S+"
+        },
+        "p3": {
+            "company": "Creality_1",
+            "model": "Ender 3"
+        },
+        "p4": {
+            "company": "Creality_1",
+            "model": "Ender 3"
+        },
+        "p5": {
+            "company": "Creality_1",
+            "model": "Ender 3"
+        },
+        "p6": {
+            "company": "Creality_1",
+            "model": "Ender 3"
+        }
+    },
+    "filaments": {},
+    "jobs": {}
+}

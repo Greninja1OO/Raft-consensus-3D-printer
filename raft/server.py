@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import os, json
+import requests
 
 def create_raft_server(raft_node):
     app = Flask(__name__)
@@ -8,15 +9,18 @@ def create_raft_server(raft_node):
     filaments = {}
     jobs = {}
 
-    STATE_FILE = f"state_{raft_node.node_id}_data.json"
+    STATE_FILE = f"state_{raft_node.node_id}.json"  # Changed to match node state file
 
     def save_all_state():
+        state = {
+            'term': raft_node.term,
+            'voted_for': raft_node.voted_for,
+            'printers': printers,
+            'filaments': filaments,
+            'jobs': jobs
+        }
         with open(STATE_FILE, 'w') as f:
-            json.dump({
-                'printers': printers,
-                'filaments': filaments,
-                'jobs': jobs
-            }, f)
+            json.dump(state, f, indent=4)
         print(f"[{raft_node.node_id}] 💾 State saved to {STATE_FILE}")
 
     def load_all_state():
@@ -49,7 +53,13 @@ def create_raft_server(raft_node):
             }
         elif op == 'add_job':
             job_id = data.get('id')
-            jobs[job_id] = data
+            jobs[job_id] = {
+                'printer_id': data.get('printer_id'),
+                'filament_id': data.get('filament_id'),
+                'filepath': data.get('filepath'),
+                'print_weight_in_grams': data.get('print_weight_in_grams'),
+                'status': 'Queued'
+            }
         elif op == 'update_job_status':
             job_id = data.get('job_id')
             new_status = data.get('status')
@@ -76,9 +86,17 @@ def create_raft_server(raft_node):
         if raft_node.role == 'leader':
             return jsonify({'success': False, 'error': 'Already leader'}), 400
 
+        # Update term if needed
+        if term > raft_node.term:
+            raft_node.term = term
+            raft_node.voted_for = None
+            raft_node.role = 'follower'
+
         # Apply the replicated command
         try:
             apply_state_change(command)
+            # Save state after applying command
+            save_all_state()
             print(f"[{raft_node.node_id}] ✅ Applied replicated command from leader {leader_id}")
             return jsonify({'success': True}), 200
         except Exception as e:
@@ -111,7 +129,7 @@ def create_raft_server(raft_node):
 
     @app.route('/state', methods=['GET'])
     def get_state():
-        """Endpoint for peers to get state"""
+        """Get current state for synchronization"""
         return jsonify({
             'printers': printers,
             'filaments': filaments,
@@ -146,7 +164,19 @@ def create_raft_server(raft_node):
     @app.route('/api/v1/printers', methods=['POST'])
     def create_printer():
         if not is_leader():
-            return jsonify({'error': 'This node is not the leader'}), 403
+            leader_host, leader_port = find_current_leader()
+            if leader_host and leader_port:
+                try:
+                    response = requests.post(
+                        f'http://{leader_host}:{leader_port}/api/v1/printers',
+                        json=request.json,
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    return jsonify(response.json()), response.status_code
+                except:
+                    return jsonify({'error': 'Failed to forward request to leader'}), 500
+            return jsonify({'error': 'This node is not the leader and could not find the leader'}), 403
+
         data = request.json
         printer_id = data.get('id')
         if not printer_id or printer_id in printers:
@@ -168,20 +198,29 @@ def create_raft_server(raft_node):
     @app.route('/api/v1/filaments', methods=['POST'])
     def create_filament():
         if not is_leader():
-            return jsonify({'error': 'This node is not the leader'}), 403
+            leader_host, leader_port = find_current_leader()
+            if leader_host and leader_port:
+                try:
+                    response = requests.post(
+                        f'http://{leader_host}:{leader_port}/api/v1/filaments',
+                        json=request.json,
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    return jsonify(response.json()), response.status_code
+                except:
+                    return jsonify({'error': 'Failed to forward request to leader'}), 500
+            return jsonify({'error': 'This node is not the leader and could not find the leader'}), 403
+
         data = request.json
         filament_id = data.get('id')
         if not filament_id or filament_id in filaments:
             return jsonify({'error': 'Invalid or duplicate filament ID'}), 400
-        filaments[filament_id] = {
-            'type': data.get('type'),
-            'color': data.get('color'),
-            'total_weight': data.get('total_weight_in_grams'),
-            'remaining_weight': data.get('remaining_weight_in_grams')
-        }
-        raft_node.apply_command({'op': 'add_filament', 'data': data})
-        save_all_state()
-        return jsonify({'success': True}), 201
+
+        command = {'op': 'add_filament', 'data': data}
+        if raft_node.apply_command(command):
+            apply_state_change(command)
+            return jsonify({'success': True}), 201
+        return jsonify({'error': 'Failed to replicate command'}), 500
 
     @app.route('/api/v1/filaments', methods=['GET'])
     def get_filaments():
@@ -193,7 +232,18 @@ def create_raft_server(raft_node):
     @app.route('/api/v1/jobs', methods=['POST'])
     def create_job():
         if not is_leader():
-            return jsonify({'error': 'This node is not the leader'}), 403
+            leader_host, leader_port = find_current_leader()
+            if leader_host and leader_port:
+                try:
+                    response = requests.post(
+                        f'http://{leader_host}:{leader_port}/api/v1/jobs',
+                        json=request.json,
+                        headers={'Content-Type': 'application/json'}
+                    )
+                    return jsonify(response.json()), response.status_code
+                except:
+                    return jsonify({'error': 'Failed to forward request to leader'}), 500
+            return jsonify({'error': 'This node is not the leader and could not find the leader'}), 403
 
         data = request.json
         job_id = data.get('id')
@@ -221,17 +271,11 @@ def create_raft_server(raft_node):
         if weight > available:
             return jsonify({'error': f'Not enough available filament. Available: {available}g'}), 400
 
-        jobs[job_id] = {
-            'printer_id': printer_id,
-            'filament_id': filament_id,
-            'filepath': filepath,
-            'print_weight_in_grams': weight,
-            'status': status
-        }
-
-        raft_node.apply_command({'op': 'add_job', 'data': jobs[job_id]})
-        save_all_state()
-        return jsonify({'success': True}), 201
+        command = {'op': 'add_job', 'data': data}
+        if raft_node.apply_command(command):
+            apply_state_change(command)
+            return jsonify({'success': True}), 201
+        return jsonify({'error': 'Failed to replicate command'}), 500
 
     @app.route('/api/v1/jobs', methods=['GET'])
     def get_jobs():
@@ -267,6 +311,19 @@ def create_raft_server(raft_node):
         raft_node.apply_command({'op': 'update_job_status', 'data': {'job_id': job_id, 'status': new_status}})
         save_all_state()
         return jsonify({'success': True}), 200
+
+    def find_current_leader():
+        """Find the current leader node by checking each peer"""
+        for peer_host, peer_port in raft_node.peers:
+            try:
+                response = requests.get(f'http://{peer_host}:{peer_port}/status', timeout=1)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('role') == 'leader':
+                        return peer_host, peer_port
+            except:
+                continue
+        return None, None
 
     load_all_state()
     return app
