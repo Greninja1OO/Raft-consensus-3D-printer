@@ -1,30 +1,10 @@
 {
-    "term": 34,
+    "term": 1,
     "voted_for": null,
     "printers": {
-        "p1": {
-            "company": "Creality",
-            "model": "Ender 3"
-        },
-        "p2": {
-            "company": "Prussa",
-            "model": "i3 MK3S+"
-        },
-        "p3": {
-            "company": "Creality_1",
-            "model": "Ender 3"
-        },
-        "p4": {
-            "company": "Creality_1",
-            "model": "Ender 3"
-        },
-        "p5": {
-            "company": "Creality_1",
-            "model": "Ender 3"
-        },
-        "p6": {
-            "company": "Creality_1",
-            "model": "Ender 3"
+        "p10": {
+            "company": "Prusa",
+            "model": "Mini+"
         }
     },
     "filaments": {},

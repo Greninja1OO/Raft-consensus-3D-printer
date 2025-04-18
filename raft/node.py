@@ -135,7 +135,7 @@ class RaftNode:
                     self.jobs.update(peer_state.get('jobs', {}))
                     print(f"[{self.node_id}] 🔄 Synced state with peer {peer_host}:{peer_port}")
             except Exception as e:
-                print(f"[{self.node_id}] ❌ Failed to sync with peer {host}:{port}: {str(e)}")
+                print(f"[{self.node_id}] ❌ Failed to sync with peer {peer_host}:{peer_port}: {str(e)}")
         self._save_state()
 
     def _start_heartbeat(self):
