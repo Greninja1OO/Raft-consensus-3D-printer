@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 import os, json
-
+import time
 def create_raft_server(raft_node):
     app = Flask(__name__)
 
@@ -8,25 +8,60 @@ def create_raft_server(raft_node):
     filaments = {}
     jobs = {}
 
-    STATE_FILE = f"state_{raft_node.node_id}_data.json"
+    def save_state():
+        """Save state to the node's state file"""
+        state_file = f"state_{raft_node.node_id}.json"
+        try:
+            # Read existing state
+            with open(state_file, 'r') as f:
+                existing_state = json.load(f)
+                
+            # Update only Raft consensus info, preserve application data
+            existing_state.update({
+                'term': raft_node.term,
+                'voted_for': raft_node.voted_for
+            })
+            
+            # Only update application data if it exists (not empty)
+            if printers:
+                existing_state['printers'] = printers
+            if filaments:
+                existing_state['filaments'] = filaments
+            if jobs:
+                existing_state['jobs'] = jobs
+            
+            # Write back the merged state
+            with open(state_file, 'w') as f:
+                json.dump(existing_state, f, indent=4)
+                
+        except FileNotFoundError:
+            # If file doesn't exist, create it with current state
+            with open(state_file, 'w') as f:
+                json.dump({
+                    'term': raft_node.term,
+                    'voted_for': raft_node.voted_for,
+                    'printers': printers,
+                    'filaments': filaments,
+                    'jobs': jobs
+                }, f, indent=4)
 
-    def save_all_state():
-        with open(STATE_FILE, 'w') as f:
-            json.dump({
-                'printers': printers,
-                'filaments': filaments,
-                'jobs': jobs
-            }, f)
-        print(f"[{raft_node.node_id}] 💾 State saved to {STATE_FILE}")
-
-    def load_all_state():
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, 'r') as f:
-                data = json.load(f)
-                printers.update(data.get('printers', {}))
-                filaments.update(data.get('filaments', {}))
-                jobs.update(data.get('jobs', {}))
-            print(f"[{raft_node.node_id}] 📂 State loaded from {STATE_FILE}")
+    def load_state():
+        """Load state from the node's state file"""
+        state_file = f"state_{raft_node.node_id}.json"
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, 'r') as f:
+                    state = json.load(f)
+                    # Only update if there's data
+                    if state.get('printers'):
+                        printers.update(state['printers'])
+                    if state.get('filaments'):
+                        filaments.update(state['filaments'])
+                    if state.get('jobs'):
+                        jobs.update(state['jobs'])
+                print(f"[{raft_node.node_id}] 📂 Loaded existing state")
+            except Exception as e:
+                print(f"[{raft_node.node_id}] ❌ Error loading state: {str(e)}")
 
     def apply_state_change(command):
         """Apply a state change from a command"""
@@ -60,7 +95,62 @@ def create_raft_server(raft_node):
                     used = jobs[job_id]['print_weight_in_grams']
                     filaments[f_id]['remaining_weight'] = max(0, filaments[f_id]['remaining_weight'] - used)
         
-        save_all_state()
+        save_state()
+
+    def validate_printer(data):
+        """Validate printer data"""
+        required = {'id', 'company', 'model'}
+        if not all(k in data for k in required):
+            return False, "Missing required fields"
+        if data['id'] in printers:
+            return False, "Printer ID already exists"
+        return True, None
+
+    def validate_filament(data):
+        """Validate filament data"""
+        required = {'id', 'type', 'color', 'total_weight_in_grams'}
+        if not all(k in data for k in required):
+            return False, "Missing required fields"
+        if data['id'] in filaments:
+            return False, "Filament ID already exists"
+        if data['type'] not in ['PLA', 'PETG', 'ABS', 'TPU']:
+            return False, "Invalid filament type"
+        try:
+            weight = float(data['total_weight_in_grams'])
+            if weight <= 0:
+                return False, "Weight must be positive"
+            data['total_weight_in_grams'] = weight
+            data['remaining_weight_in_grams'] = weight
+        except ValueError:
+            return False, "Invalid weight value"
+        return True, None
+
+    def check_filament_availability(filament_id, required_weight):
+        """Check if filament has enough material for print"""
+        if filament_id not in filaments:
+            return False, "Filament not found"
+        
+        queued_weight = sum(
+            job['print_weight_in_grams']
+            for job in jobs.values()
+            if job['filament_id'] == filament_id 
+            and job['status'] in ['Queued', 'Running']
+        )
+        
+        available = filaments[filament_id]['remaining_weight'] - queued_weight
+        if required_weight > available:
+            return False, f"Not enough filament. Available: {available}g"
+        return True, None
+
+    def validate_job_status_transition(current_status, new_status):
+        """Validate job status transitions"""
+        valid_transitions = {
+            'Queued': ['Running', 'Cancelled'],
+            'Running': ['Done', 'Cancelled'],
+            'Done': [],
+            'Cancelled': []
+        }
+        return new_status in valid_transitions.get(current_status, [])
 
     @app.route('/replicate', methods=['POST'])
     def replicate():
@@ -76,13 +166,31 @@ def create_raft_server(raft_node):
         if raft_node.role == 'leader':
             return jsonify({'success': False, 'error': 'Already leader'}), 400
 
-        # Apply the replicated command
+        # First log the command
+        log_file = f'log_node_{raft_node.port}.json'
+        try:
+            with open(log_file, 'r') as f:
+                log_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            log_data = {"log_entries": []}
+        
+        log_data["log_entries"].append({
+            "term": term,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "command": command
+        })
+        
+        with open(log_file, 'w') as f:
+            json.dump(log_data, f, indent=4)
+
+        # Then apply the command
         try:
             apply_state_change(command)
-            print(f"[{raft_node.node_id}] ✅ Applied replicated command from leader {leader_id}")
+            save_state()  # Save to state file
+            print(f"[{raft_node.node_id}] ✅ Applied and logged command from leader {leader_id}")
             return jsonify({'success': True}), 200
         except Exception as e:
-            print(f"[{raft_node.node_id}] ❌ Failed to apply replicated command: {str(e)}")
+            print(f"[{raft_node.node_id}] ❌ Failed to apply command: {str(e)}")
             return jsonify({'success': False, 'error': str(e)}), 500
 
     def sync_state_with_peers():
@@ -90,24 +198,79 @@ def create_raft_server(raft_node):
         if not is_leader():
             return
         
+        merged_state = {
+            'printers': {},
+            'filaments': {},
+            'jobs': {}
+        }
+        
+        # First add our own state
+        merged_state['printers'].update(printers)
+        merged_state['filaments'].update(filaments)
+        merged_state['jobs'].update(jobs)
+        
+        # Then merge with other peers
         for peer in raft_node.peers:
             try:
                 host, port = peer
-                # Get state from each peer
                 response = requests.get(f'http://{host}:{port}/state', timeout=2)
                 if response.status_code == 200:
                     peer_state = response.json()
-                    # Merge state - take most recent updates
-                    printers.update(peer_state.get('printers', {}))
-                    filaments.update(peer_state.get('filaments', {}))
-                    jobs.update(peer_state.get('jobs', {}))
-                    print(f"[{raft_node.node_id}] 🔄 Synced state with peer {host}:{port}")
+                    merged_state['printers'].update(peer_state.get('printers', {}))
+                    merged_state['filaments'].update(peer_state.get('filaments', {}))
+                    merged_state['jobs'].update(peer_state.get('jobs', {}))
+                    print(f"[{raft_node.node_id}] 🔄 Merged state with peer {host}:{port}")
             except Exception as e:
                 print(f"[{raft_node.node_id}] ❌ Failed to sync with peer {host}:{port}: {str(e)}")
-        save_all_state()
+        
+        # Update our state with merged data
+        printers.clear()
+        filaments.clear()
+        jobs.clear()
+        printers.update(merged_state['printers'])
+        filaments.update(merged_state['filaments'])
+        jobs.update(merged_state['jobs'])
+        save_state()
+        print(f"[{raft_node.node_id}] ✅ State sync complete")
+
+    # Set sync callback in node
+    raft_node.set_sync_callback(sync_state_with_peers)
 
     def is_leader():
         return raft_node.role == 'leader'
+
+    def log_command(command):
+        """Log command to node's log file"""
+        log_file = f'log_node_{raft_node.port}.json'
+        try:
+            with open(log_file, 'r') as f:
+                log_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            log_data = {"log_entries": []}
+        
+        log_data["log_entries"].append({
+            "term": raft_node.term,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "command": command
+        })
+        
+        with open(log_file, 'w') as f:
+            json.dump(log_data, f, indent=4)
+
+    def apply_command(command):
+        """Apply command only after replication"""
+        if not is_leader():
+            # Followers apply command directly after leader validation
+            apply_state_change(command)
+            log_command(command)
+            return True
+        
+        # Leader must replicate first
+        if raft_node.replicate_command(command):
+            apply_state_change(command)
+            log_command(command)
+            return True
+        return False
 
     @app.route('/state', methods=['GET'])
     def get_state():
@@ -130,7 +293,10 @@ def create_raft_server(raft_node):
     def heartbeat():
         data = request.json
         term = data.get('term')
-        raft_node.receive_heartbeat(term)
+        leader_id = data.get('leader_id')
+        leader_host = data.get('leader_host')
+        leader_port = data.get('leader_port')
+        raft_node.receive_heartbeat(term, leader_id, leader_host, leader_port)
         return jsonify({'success': True}), 200
 
     @app.route('/status', methods=['GET'])
@@ -147,14 +313,11 @@ def create_raft_server(raft_node):
     def create_printer():
         if not is_leader():
             return jsonify({'error': 'This node is not the leader'}), 403
+        
         data = request.json
-        printer_id = data.get('id')
-        if not printer_id or printer_id in printers:
-            return jsonify({'error': 'Invalid or duplicate printer ID'}), 400
-
         command = {'op': 'add_printer', 'data': data}
-        if raft_node.apply_command(command):
-            apply_state_change(command)
+        
+        if apply_command(command):
             return jsonify({'success': True}), 201
         return jsonify({'error': 'Failed to replicate command'}), 500
 
@@ -169,19 +332,16 @@ def create_raft_server(raft_node):
     def create_filament():
         if not is_leader():
             return jsonify({'error': 'This node is not the leader'}), 403
+        
         data = request.json
-        filament_id = data.get('id')
-        if not filament_id or filament_id in filaments:
+        # Validate input
+        if not data.get('id') or data.get('id') in filaments:
             return jsonify({'error': 'Invalid or duplicate filament ID'}), 400
-        filaments[filament_id] = {
-            'type': data.get('type'),
-            'color': data.get('color'),
-            'total_weight': data.get('total_weight_in_grams'),
-            'remaining_weight': data.get('remaining_weight_in_grams')
-        }
-        raft_node.apply_command({'op': 'add_filament', 'data': data})
-        save_all_state()
-        return jsonify({'success': True}), 201
+            
+        command = {'op': 'add_filament', 'data': data}
+        if apply_command(command):
+            return jsonify({'success': True}), 201
+        return jsonify({'error': 'Failed to replicate command'}), 500
 
     @app.route('/api/v1/filaments', methods=['GET'])
     def get_filaments():
@@ -201,7 +361,6 @@ def create_raft_server(raft_node):
         filament_id = data.get('filament_id')
         filepath = data.get('filepath')
         weight = data.get('print_weight_in_grams')
-        status = 'Queued'
 
         if not all([job_id, printer_id, filament_id, filepath, weight]):
             return jsonify({'error': 'Missing job parameters'}), 400
@@ -221,17 +380,12 @@ def create_raft_server(raft_node):
         if weight > available:
             return jsonify({'error': f'Not enough available filament. Available: {available}g'}), 400
 
-        jobs[job_id] = {
-            'printer_id': printer_id,
-            'filament_id': filament_id,
-            'filepath': filepath,
-            'print_weight_in_grams': weight,
-            'status': status
-        }
-
-        raft_node.apply_command({'op': 'add_job', 'data': jobs[job_id]})
-        save_all_state()
-        return jsonify({'success': True}), 201
+        data['status'] = 'Queued'  # Add initial status
+        command = {'op': 'add_job', 'data': data}
+        
+        if apply_command(command):
+            return jsonify({'success': True}), 201
+        return jsonify({'error': 'Failed to replicate command'}), 500
 
     @app.route('/api/v1/jobs', methods=['GET'])
     def get_jobs():
@@ -239,34 +393,49 @@ def create_raft_server(raft_node):
             {'id': jid, **jdata} for jid, jdata in jobs.items()
         ]), 200
 
-    @app.route('/api/v1/jobs/<job_id>/status', methods=['PATCH'])
+    @app.route('/api/v1/jobs/<job_id>/status', methods=['POST'])
     def update_job_status(job_id):
         if not is_leader():
             return jsonify({'error': 'This node is not the leader'}), 403
+        
         if job_id not in jobs:
             return jsonify({'error': 'Job not found'}), 404
-        data = request.json
-        new_status = data.get('status', '').capitalize()
+        
+        new_status = request.args.get('status', '').capitalize()
         current_status = jobs[job_id]['status']
 
-        valid = {
-            'Queued': ['Running', 'Cancelled'],
-            'Running': ['Done', 'Cancelled'],
-            'Done': [],
-            'Cancelled': []
-        }
-        if new_status not in valid[current_status]:
-            return jsonify({'error': f'Invalid transition: {current_status} → {new_status}'}), 400
+        if not validate_job_status_transition(current_status, new_status):
+            return jsonify({
+                'error': f'Invalid transition: {current_status} → {new_status}'
+            }), 400
 
-        jobs[job_id]['status'] = new_status
+        # Handle filament weight update when job is done
         if new_status == 'Done':
-            f_id = jobs[job_id]['filament_id']
-            used = jobs[job_id]['print_weight_in_grams']
-            filaments[f_id]['remaining_weight'] = max(0, filaments[f_id]['remaining_weight'] - used)
+            filament_id = jobs[job_id]['filament_id']
+            used_weight = float(jobs[job_id]['print_weight_in_grams'])
+            if filament_id in filaments:
+                current_weight = float(filaments[filament_id].get('remaining_weight', 
+                    filaments[filament_id]['total_weight']))
+                # Update remaining weight
+                new_remaining = current_weight - used_weight
+                filaments[filament_id]['remaining_weight'] = max(0, new_remaining)
+                print(f"[{raft_node.node_id}] ⚖️ Updated filament {filament_id} remaining weight: {new_remaining}g (used {used_weight}g)")
 
-        raft_node.apply_command({'op': 'update_job_status', 'data': {'job_id': job_id, 'status': new_status}})
-        save_all_state()
-        return jsonify({'success': True}), 200
+        # Update job status and create command
+        jobs[job_id]['status'] = new_status
+        command = {
+            'op': 'update_job_status',
+            'data': {
+                'job_id': job_id,
+                'status': new_status,
+                'filament_id': jobs[job_id]['filament_id'],
+                'print_weight_in_grams': float(jobs[job_id]['print_weight_in_grams'])
+            }
+        }
+        
+        if apply_command(command):
+            return jsonify({'success': True}), 200
+        return jsonify({'error': 'Failed to update job status'}), 500
 
-    load_all_state()
+    load_state()
     return app

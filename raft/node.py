@@ -27,6 +27,8 @@ class RaftNode:
         self.lock = threading.Lock()
         self.discovery_interval = 30  # seconds between peer discovery attempts
 
+        self.sync_callback = None  # Add callback for server sync
+
         # Start election thread
         self.election_thread = threading.Thread(target=self._run_election)
         self.election_thread.daemon = True
@@ -36,6 +38,10 @@ class RaftNode:
         self.discovery_thread = threading.Thread(target=self._run_peer_discovery)
         self.discovery_thread.daemon = True
         self.discovery_thread.start()
+
+    def set_sync_callback(self, callback):
+        """Set callback for state synchronization"""
+        self.sync_callback = callback
 
     def reset_election_timeout(self):
         self.last_heartbeat = time.time()
@@ -112,6 +118,9 @@ class RaftNode:
                     if self.votes_received > total_alive_nodes // 2:
                         print(f"[{self.node_id}] 👑 Elected as leader for term {self.term}")
                         self.role = 'leader'
+                        # Call sync callback if set
+                        if self.sync_callback:
+                            self.sync_callback()
                         self._start_heartbeat()
                     else:
                         print(f"[{self.node_id}] 🔄 Election failed, returning to follower state")
@@ -126,9 +135,12 @@ class RaftNode:
                     current_peers = self._get_alive_peers()
                     for peer_host, peer_port in current_peers:
                         try:
+                            # Include leader info in heartbeat
                             requests.post(f'http://{peer_host}:{peer_port}/heartbeat', json={
                                 'term': self.term,
-                                'leader_id': self.node_id
+                                'leader_id': self.node_id,
+                                'leader_host': self.host,
+                                'leader_port': self.port
                             }, timeout=1)
                             print(f"[{self.node_id}] 💗 Heartbeat sent to {peer_host}:{peer_port}")
                         except Exception:
@@ -136,6 +148,8 @@ class RaftNode:
                             self._mark_peer_dead(peer_host, peer_port)
                 time.sleep(2)
         threading.Thread(target=heartbeat_loop, daemon=True).start()
+        # Update leader info when becoming leader
+        self._update_leader_info()
 
     def _mark_peer_dead(self, host, port):
         """Mark a peer as dead in peers.json when it's unreachable"""
@@ -148,20 +162,53 @@ class RaftNode:
                 if peer['host'] == host and peer['port'] == port and peer['status'] != 'dead':
                     peer['status'] = 'dead'
                     print(f"[{self.node_id}] 💀 Marked peer {host}:{port} as dead")
-                    with open('config/peers.json', 'w') as f:
-                        json.dump(peers_data, f, indent=4)
-                    break
+            
+            # Check if all peers are dead
+            all_dead = all(peer['status'] == 'dead' for peer in peers_data.get('peers', []))
+            if all_dead:
+                # Reset leader info when all peers are dead
+                peers_data['leader'] = {
+                    "host": None,
+                    "port": None,
+                    "node_id": None
+                }
+                print(f"[{self.node_id}] ⚠️ All peers are dead, reset leader info")
+            
+            with open('config/peers.json', 'w') as f:
+                json.dump(peers_data, f, indent=4)
         except Exception as e:
             print(f"[{self.node_id}] ❌ Error marking peer as dead: {str(e)}")
 
-    def receive_heartbeat(self, term):
+    def receive_heartbeat(self, term, leader_id=None, leader_host=None, leader_port=None):
         with self.lock:
             if term >= self.term:
+                # Always get latest state from leader on heartbeat
+                if leader_host and leader_port:
+                    try:
+                        response = requests.get(f'http://{leader_host}:{leader_port}/state', timeout=2)
+                        if response.status_code == 200:
+                            state = response.json()
+                            # Only update if leader has data
+                            if state.get('printers'):
+                                self.printers.update(state.get('printers', {}))
+                            if state.get('filaments'):
+                                self.filaments.update(state.get('filaments', {}))
+                            if state.get('jobs'):
+                                self.jobs.update(state.get('jobs', {}))
+                            self._save_state()  # Save after every successful sync
+                            print(f"[{self.node_id}] 📥 Synced state from leader")
+                    except Exception as e:
+                        print(f"[{self.node_id}] ❌ Failed to sync state from leader: {str(e)}")
+
                 if self.role != 'follower':
                     print(f"[{self.node_id}] ⬇️ Stepping down to follower (term {term})")
+                    
                 self.term = term
                 self.role = 'follower'
                 self.voted_for = None
+                
+                if leader_id and leader_host and leader_port:
+                    self._update_leader_info(leader_host, leader_port, leader_id)
                 self.reset_election_timeout()
                 print(f"[{self.node_id}] 💗 Heartbeat received (term {term})")
 
@@ -188,6 +235,7 @@ class RaftNode:
         success_count = 1  # Count self
         current_peers = self._get_alive_peers()
         
+        # Then replicate to followers
         for peer_host, peer_port in current_peers:
             try:
                 response = requests.post(
@@ -204,11 +252,12 @@ class RaftNode:
                     print(f"[{self.node_id}] ✅ Command replicated to {peer_host}:{peer_port}")
                 else:
                     print(f"[{self.node_id}] ❌ Failed to replicate to {peer_host}:{peer_port}")
+                    return False
             except Exception as e:
                 print(f"[{self.node_id}] ❌ Error replicating to {peer_host}:{peer_port}: {str(e)}")
                 self._mark_peer_dead(peer_host, peer_port)
+                return False
         
-        # Command is successful if majority of nodes acknowledge it
         return success_count > (len(current_peers) + 1) // 2
 
     def apply_command(self, command):
@@ -254,12 +303,35 @@ class RaftNode:
             new_status = data.get('status')
             if job_id in self.jobs:
                 self.jobs[job_id]['status'] = new_status
-                if new_status == 'Done':
-                    f_id = self.jobs[job_id]['filament_id']
-                    used = self.jobs[job_id]['print_weight_in_grams']
-                    self.filaments[f_id]['remaining_weight'] = max(0, self.filaments[f_id]['remaining_weight'] - used)
+                # Remove weight update from here as it's handled in server.py
         
         self._save_state()
+
+    def _update_leader_info(self, host=None, port=None, leader_id=None):
+        """Update leader information in peers.json"""
+        if host is None:
+            host = self.host
+        if port is None:
+            port = self.port
+        if leader_id is None:
+            leader_id = self.node_id
+            
+        try:
+            peers_file = 'config/peers.json'
+            with open(peers_file, 'r') as f:
+                peers_data = json.load(f)
+            
+            peers_data['leader'] = {
+                "host": host,
+                "port": port,
+                "node_id": leader_id
+            }
+            
+            with open(peers_file, 'w') as f:
+                json.dump(peers_data, f, indent=4)
+            print(f"[{self.node_id}] 👑 Updated leader info: {host}:{port}")
+        except Exception as e:
+            print(f"[{self.node_id}] ❌ Error updating leader info: {str(e)}")
 
     def _run_peer_discovery(self):
         while True:
