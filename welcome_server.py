@@ -78,7 +78,7 @@ def proxy_to_leader(subpath):
     if not leader:
         return jsonify({
             'success': False,
-            'error': 'No leader found'
+            'error': 'No leader found - the cluster is currently electing a new leader'
         }), 404
     
     try:
@@ -101,12 +101,12 @@ def proxy_to_leader(subpath):
     except requests.Timeout:
         return jsonify({
             'success': False,
-            'error': 'Request to leader timed out'
+            'error': 'Request to leader timed out - the leader node might be busy'
         }), 504  # Gateway Timeout
     except requests.ConnectionError:
         return jsonify({
             'success': False,
-            'error': 'Could not connect to leader'
+            'error': 'Could not connect to leader - the leader node might have failed'
         }), 502  # Bad Gateway
     except Exception as e:
         return jsonify({

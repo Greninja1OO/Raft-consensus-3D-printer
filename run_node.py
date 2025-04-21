@@ -6,6 +6,25 @@ from raft.server import create_raft_server
 import threading
 import time
 import atexit
+import os
+
+def create_node_config(port):
+    """Create a new node configuration file for the given port"""
+    config = {
+        "node_id": f"node_{port}",
+        "host": "127.0.0.1",
+        "port": port
+    }
+    
+    # Create config directory if it doesn't exist
+    os.makedirs('config', exist_ok=True)
+    
+    # Save the configuration
+    config_path = f'config/node_{port}.json'
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=4)
+    print(f"[node_{port}] ✨ Created new node configuration at {config_path}")
+    return config
 
 def update_peer_status(host, port, status):
     peers_file = 'config/peers.json'
@@ -30,11 +49,10 @@ def register_peer(node_info):
     try:
         with open(peers_file, 'r') as f:
             peers_data = json.load(f)
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError):
+        # Create new peers.json if it doesn't exist or is corrupt
         peers_data = {"peers": []}
-    except json.JSONDecodeError:
-        print(f"[{node_id}] ❌ Error: {peers_file} is corrupt. Creating new peers list.")
-        peers_data = {"peers": []}
+        os.makedirs('config', exist_ok=True)
     
     # Create new peer entry
     new_peer = {
@@ -84,26 +102,44 @@ def signal_handler(signum, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-# Load config
-with open(f'config/{sys.argv[1]}.json') as f:
-    config = json.load(f)
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: python run_node.py <port>")
+        sys.exit(1)
 
-node_id = config['node_id']
-host = config['host']
-port = config['port']
+    try:
+        port = int(sys.argv[1])
+    except ValueError:
+        print("Error: Port must be a number")
+        sys.exit(1)
 
-# Register this node and get updated peers list
-peers = register_peer({"host": host, "port": port})
-print(f"[{node_id}] 📋 Initial peers list: {peers}")
+    # Try to load existing config or create new one
+    config_file = f'config/node_{port}.json'
+    try:
+        with open(config_file) as f:
+            config = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        config = create_node_config(port)
 
-# Start Raft node
-raft_node = RaftNode(node_id=node_id, peers=peers, host=host, port=port)
+    node_id = config['node_id']
+    host = config['host']
+    port = config['port']
 
-# Start Flask server
-app = create_raft_server(raft_node)
-threading.Thread(target=lambda: app.run(host=host, port=port), daemon=True).start()
+    # Register this node and get updated peers list
+    peers = register_peer({"host": host, "port": port})
+    print(f"[{node_id}] 📋 Initial peers list: {peers}")
 
-print(f"[{node_id}] 🚀 Node started with peers: {peers}")
-while True:
-    time.sleep(1)
+    # Ensure logs directory exists
+    os.makedirs('logs', exist_ok=True)
+    
+    # Start Raft node
+    raft_node = RaftNode(node_id=node_id, peers=peers, host=host, port=port)
+
+    # Start Flask server
+    app = create_raft_server(raft_node)
+    threading.Thread(target=lambda: app.run(host=host, port=port), daemon=True).start()
+
+    print(f"[{node_id}] 🚀 Node started with peers: {peers}")
+    while True:
+        time.sleep(1)
 

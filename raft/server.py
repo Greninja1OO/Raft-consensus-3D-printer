@@ -75,6 +75,7 @@ def create_raft_server(raft_node):
         term = data.get('term')
         leader_id = data.get('leader_id')
         command = data.get('command')
+        leader_log_index = data.get('log_index')
 
         if term < raft_node.term:
             return jsonify({'success': False, 'error': 'Term is outdated'}), 400
@@ -88,13 +89,17 @@ def create_raft_server(raft_node):
             raft_node.voted_for = None
             raft_node.role = 'follower'
 
-        # Apply the replicated command
+        # Apply the replicated command and save to log
         try:
+            # Save to log first
+            raft_node._save_log_entry(command, term)
+            
+            # Then apply the change
             apply_state_change(command)
-            # Save state after applying command
             save_all_state()
-            print(f"[{raft_node.node_id}] ✅ Applied replicated command from leader {leader_id}")
-            return jsonify({'success': True}), 200
+            
+            print(f"[{raft_node.node_id}] ✅ Applied and logged replicated command from leader {leader_id}")
+            return jsonify({'success': True, 'log_index': raft_node.log_index}), 200
         except Exception as e:
             print(f"[{raft_node.node_id}] ❌ Failed to apply replicated command: {str(e)}")
             return jsonify({'success': False, 'error': str(e)}), 500
@@ -129,7 +134,8 @@ def create_raft_server(raft_node):
         return jsonify({
             'printers': raft_node.printers,
             'filaments': raft_node.filaments,
-            'jobs': raft_node.jobs
+            'jobs': raft_node.jobs,
+            'log_index': raft_node.log_index
         }), 200
 
     @app.route('/vote', methods=['POST'])
@@ -212,26 +218,41 @@ def create_raft_server(raft_node):
         filament_id = data.get('filament_id')
         filepath = data.get('filepath')
         weight = data.get('print_weight_in_grams')
-        status = 'Queued'
 
+        # Validation checks
         if not all([job_id, printer_id, filament_id, filepath, weight]):
-            return jsonify({'error': 'Missing job parameters'}), 400
+            return jsonify({'error': 'Missing required fields'}), 400
         if job_id in raft_node.jobs:
-            return jsonify({'error': 'Job already exists'}), 409
+            return jsonify({'error': 'Job ID already exists'}), 409
         if printer_id not in raft_node.printers:
             return jsonify({'error': 'Printer not found'}), 404
         if filament_id not in raft_node.filaments:
             return jsonify({'error': 'Filament not found'}), 404
 
+        # Check printer availability
+        printer_busy = any(
+            job['printer_id'] == printer_id and job['status'] in ['Queued', 'Running']
+            for job in raft_node.jobs.values()
+        )
+        if printer_busy:
+            return jsonify({'error': 'Printer is currently busy'}), 400
+
+        # Calculate available filament weight
+        filament = raft_node.filaments[filament_id]
         queued_weight = sum(
             job['print_weight_in_grams']
             for job in raft_node.jobs.values()
             if job['filament_id'] == filament_id and job['status'] in ['Queued', 'Running']
         )
-        available = raft_node.filaments[filament_id]['remaining_weight'] - queued_weight
-        if weight > available:
-            return jsonify({'error': f'Not enough available filament. Available: {available}g'}), 400
+        available_weight = filament['remaining_weight'] - queued_weight
 
+        if weight > available_weight:
+            return jsonify({
+                'error': f'Insufficient filament. Available: {available_weight}g, Required: {weight}g'
+            }), 400
+
+        # Add job with initial status
+        data['status'] = 'Queued'
         command = {'op': 'add_job', 'data': data}
         if raft_node.apply_command(command):
             return jsonify({'success': True}), 201
@@ -247,25 +268,51 @@ def create_raft_server(raft_node):
     def update_job_status(job_id):
         if not raft_node.role == 'leader':
             return jsonify({'error': 'This node is not the leader'}), 403
+        
         if job_id not in raft_node.jobs:
             return jsonify({'error': 'Job not found'}), 404
+
         data = request.json
         new_status = data.get('status', '').capitalize()
         current_status = raft_node.jobs[job_id]['status']
 
-        valid = {
+        # Define valid state transitions
+        valid_transitions = {
             'Queued': ['Running', 'Cancelled'],
             'Running': ['Done', 'Cancelled'],
             'Done': [],
             'Cancelled': []
         }
-        if new_status not in valid[current_status]:
-            return jsonify({'error': f'Invalid transition: {current_status} → {new_status}'}), 400
+
+        if new_status not in valid_transitions.get(current_status, []):
+            return jsonify({
+                'error': f'Invalid status transition: {current_status} → {new_status}'
+            }), 400
+
+        # Check printer availability for 'Running' status
+        if new_status == 'Running':
+            printer_id = raft_node.jobs[job_id]['printer_id']
+            printer_busy = any(
+                j['printer_id'] == printer_id and j['status'] == 'Running'
+                for jid, j in raft_node.jobs.items()
+                if jid != job_id
+            )
+            if printer_busy:
+                return jsonify({'error': 'Printer is currently busy with another job'}), 400
 
         command = {'op': 'update_job_status', 'data': {'job_id': job_id, 'status': new_status}}
         if raft_node.apply_command(command):
             return jsonify({'success': True}), 200
         return jsonify({'error': 'Failed to replicate command'}), 500
+
+    @app.route('/logs/<int:from_index>', methods=['GET'])
+    def get_logs(from_index):
+        """Get log entries from a specific index"""
+        missing_logs = [
+            log for log in raft_node.log_entries 
+            if log['index'] >= from_index
+        ]
+        return jsonify(missing_logs), 200
 
     def find_current_leader():
         """Find the current leader node by checking each peer"""

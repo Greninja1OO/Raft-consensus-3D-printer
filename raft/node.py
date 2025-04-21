@@ -27,6 +27,12 @@ class RaftNode:
         self.lock = threading.Lock()
         self.discovery_interval = 30  # seconds between peer discovery attempts
 
+        # Change log file name to use port number
+        self.log_file = f"logs/log_{port}.json"
+        self.log_index = 0
+        os.makedirs('logs', exist_ok=True)
+        self._load_log()
+
         # Start election thread
         self.election_thread = threading.Thread(target=self._run_election)
         self.election_thread.daemon = True
@@ -66,6 +72,44 @@ class RaftNode:
                 'jobs': self.jobs
             }, f, indent=4)
         print(f"[{self.node_id}] 💾 State saved to {self.state_file}")
+
+    def _load_log(self):
+        """Load operation log from file with better error handling"""
+        try:
+            if os.path.exists(self.log_file):
+                with open(self.log_file, 'r') as f:
+                    try:
+                        self.log_entries = json.load(f)
+                        self.log_index = len(self.log_entries)
+                        print(f"[{self.node_id}] 📚 Loaded {self.log_index} existing log entries")
+                    except json.JSONDecodeError:
+                        print(f"[{self.node_id}] ⚠️ Corrupt log file, starting fresh")
+                        self.log_entries = []
+                        self.log_index = 0
+            else:
+                self.log_entries = []
+                self.log_index = 0
+        except Exception as e:
+            print(f"[{self.node_id}] ❌ Error loading log: {str(e)}")
+            self.log_entries = []
+            self.log_index = 0
+
+    def _save_log_entry(self, command, term):
+        """Save operation to log file"""
+        log_entry = {
+            'index': self.log_index,
+            'term': term,
+            'command': command,
+            'timestamp': time.time()
+        }
+        self.log_entries.append(log_entry)
+        self.log_index += 1
+        
+        try:
+            with open(self.log_file, 'w') as f:
+                json.dump(self.log_entries, f, indent=4)
+        except Exception as e:
+            print(f"[{self.node_id}] ❌ Error saving log: {str(e)}")
 
     def _get_alive_peers(self):
         """Get list of peers that are marked as alive in peers.json"""
@@ -183,6 +227,8 @@ class RaftNode:
                 self.voted_for = None
                 self.reset_election_timeout()
                 print(f"[{self.node_id}] 💗 Heartbeat received (term {term})")
+                # Try to sync logs on heartbeat
+                self.sync_with_leader()
 
     def receive_vote_request(self, term, candidate_id):
         with self.lock:
@@ -202,6 +248,8 @@ class RaftNode:
     def replicate_command(self, command):
         """Replicate a command to all followers"""
         if self.role != 'leader':
+            # Even if follower, save to log
+            self._save_log_entry(command, self.term)
             return False
             
         success_count = 1  # Count self
@@ -214,7 +262,8 @@ class RaftNode:
                     json={
                         'term': self.term,
                         'leader_id': self.node_id,
-                        'command': command
+                        'command': command,
+                        'log_index': self.log_index  # Include log index for synchronization
                     },
                     timeout=2
                 )
@@ -233,6 +282,9 @@ class RaftNode:
     def apply_command(self, command):
         """Apply a command and replicate it to followers if leader"""
         print(f"[{self.node_id}] ⚙️ Applying command: {command}")
+        
+        # Save to log first
+        self._save_log_entry(command, self.term)
         
         # Apply the change locally
         self._apply_state_change(command)
@@ -255,33 +307,56 @@ class RaftNode:
             printer_id = data.get('id')
             self.printers[printer_id] = {
                 'company': data.get('company'),
-                'model': data.get('model')
+                'model': data.get('model'),
+                'status': 'Available'  # Track printer status
             }
         elif op == 'add_filament':
             filament_id = data.get('id')
+            total_weight = data.get('total_weight_in_grams')
+            remaining_weight = data.get('remaining_weight_in_grams')
+            
+            # Validate weights
+            if remaining_weight > total_weight:
+                remaining_weight = total_weight
+                
             self.filaments[filament_id] = {
                 'type': data.get('type'),
                 'color': data.get('color'),
-                'total_weight': data.get('total_weight_in_grams'),
-                'remaining_weight': data.get('remaining_weight_in_grams')
+                'total_weight': total_weight,
+                'remaining_weight': remaining_weight
             }
         elif op == 'add_job':
             job_id = data.get('id')
-            self.jobs[job_id] = data
+            self.jobs[job_id] = {
+                'printer_id': data.get('printer_id'),
+                'filament_id': data.get('filament_id'),
+                'filepath': data.get('filepath'),
+                'print_weight_in_grams': data.get('print_weight_in_grams'),
+                'status': 'Queued',  # Always start as Queued
+                'created_at': time.time()  # Track job creation time
+            }
         elif op == 'update_job_status':
             job_id = data.get('job_id')
             new_status = data.get('status')
             if job_id in self.jobs:
+                old_status = self.jobs[job_id]['status']
                 self.jobs[job_id]['status'] = new_status
-                if new_status == 'Done':
+                
+                # Update filament weight when job is Done
+                if new_status == 'Done' and old_status != 'Done':
                     f_id = self.jobs[job_id]['filament_id']
-                    used = self.jobs[job_id]['print_weight_in_grams']
-                    self.filaments[f_id]['remaining_weight'] = max(0, self.filaments[f_id]['remaining_weight'] - used)
+                    used_weight = self.jobs[job_id]['print_weight_in_grams']
+                    current_weight = self.filaments[f_id]['remaining_weight']
+                    self.filaments[f_id]['remaining_weight'] = max(0, current_weight - used_weight)
+                
+                # Update job completion time
+                if new_status in ['Done', 'Cancelled']:
+                    self.jobs[job_id]['completed_at'] = time.time()
         
         self._save_state()
 
     def sync_with_leader(self):
-        """Sync state with current leader when node comes back online"""
+        """Sync state and logs with current leader when node comes back online"""
         for peer_host, peer_port in self.peers:
             try:
                 # Check if peer is leader
@@ -289,19 +364,49 @@ class RaftNode:
                 if status_resp.status_code == 200:
                     peer_status = status_resp.json()
                     if peer_status.get('role') == 'leader':
-                        # Get state from leader
+                        # Get state and logs from leader
                         state_resp = requests.get(f'http://{peer_host}:{peer_port}/state', timeout=2)
-                        if state_resp.status_code == 200:
+                        
+                        # First check if we have existing logs
+                        existing_logs = []
+                        if os.path.exists(self.log_file):
+                            with open(self.log_file, 'r') as f:
+                                try:
+                                    existing_logs = json.load(f)
+                                except json.JSONDecodeError:
+                                    pass  # Ignore corrupt log file
+                        
+                        # Get only new logs from leader
+                        last_index = len(existing_logs)
+                        logs_resp = requests.get(f'http://{peer_host}:{peer_port}/logs/{last_index}', timeout=2)
+                        
+                        if state_resp.status_code == 200 and logs_resp.status_code == 200:
                             leader_state = state_resp.json()
+                            new_logs = logs_resp.json()
+                            
                             # Update local state with leader's data
                             self.printers = leader_state.get('printers', {})
                             self.filaments = leader_state.get('filaments', {})
                             self.jobs = leader_state.get('jobs', {})
+                            
+                            # Merge existing logs with new logs
+                            self.log_entries = existing_logs
+                            for log_entry in new_logs:
+                                if log_entry['index'] >= last_index:
+                                    self.log_entries.append(log_entry)
+                                    self._apply_state_change(log_entry['command'])
+                            
+                            self.log_index = len(self.log_entries)
+                            
+                            # Save merged logs
+                            with open(self.log_file, 'w') as f:
+                                json.dump(self.log_entries, f, indent=4)
+                            
                             self._save_state()
-                            print(f"[{self.node_id}] 🔄 Successfully synced state with leader at {peer_host}:{peer_port}")
+                            print(f"[{self.node_id}] 🔄 Successfully synced state and preserved logs with leader")
                             return True
             except Exception as e:
-                print(f"[{self.node_id}] ❌ Failed to sync with potential leader {peer_host}:{peer_port}: {str(e)}")
+                print(f"[{self.node_id}] ❌ Failed to sync with potential leader: {str(e)}")
                 continue
         return False
 

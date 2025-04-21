@@ -2,23 +2,13 @@
     "peers": [
         {
             "host": "127.0.0.1",
-            "port": 5000,
+            "port": 5001,
             "status": "dead"
         },
         {
             "host": "127.0.0.1",
-            "port": 5001,
-            "status": "alive"
-        },
-        {
-            "host": "127.0.0.1",
-            "port": 5002,
-            "status": "alive"
-        },
-        {
-            "host": "127.0.0.1",
-            "port": 5003,
-            "status": "alive"
+            "port": 5000,
+            "status": "dead"
         }
     ]
 }
