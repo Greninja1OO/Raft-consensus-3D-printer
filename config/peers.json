@@ -3,7 +3,7 @@
         {
             "host": "127.0.0.1",
             "port": 5000,
-            "status": "alive"
+            "status": "dead"
         },
         {
             "host": "127.0.0.1",
@@ -17,8 +17,8 @@
         },
         {
             "host": "127.0.0.1",
-            "port": 5004,
-            "status": "dead"
+            "port": 5003,
+            "status": "alive"
         }
     ]
 }

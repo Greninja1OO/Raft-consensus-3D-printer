@@ -112,12 +112,31 @@ class RaftNode:
                     if self.votes_received > total_alive_nodes // 2:
                         print(f"[{self.node_id}] 👑 Elected as leader for term {self.term}")
                         self.role = 'leader'
+                        # Sync state with peers when becoming leader
+                        self._sync_state_with_peers()
                         self._start_heartbeat()
                     else:
                         print(f"[{self.node_id}] 🔄 Election failed, returning to follower state")
                         self.role = 'follower'
 
                     self.reset_election_timeout()
+
+    def _sync_state_with_peers(self):
+        """Sync state with peers when becoming leader"""
+        current_peers = self._get_alive_peers()
+        for peer_host, peer_port in current_peers:
+            try:
+                response = requests.get(f'http://{peer_host}:{peer_port}/state', timeout=2)
+                if response.status_code == 200:
+                    peer_state = response.json()
+                    # Update local state with peer data
+                    self.printers.update(peer_state.get('printers', {}))
+                    self.filaments.update(peer_state.get('filaments', {}))
+                    self.jobs.update(peer_state.get('jobs', {}))
+                    print(f"[{self.node_id}] 🔄 Synced state with peer {peer_host}:{peer_port}")
+            except Exception as e:
+                print(f"[{self.node_id}] ❌ Failed to sync with peer {peer_host}:{peer_port}: {str(e)}")
+        self._save_state()
 
     def _start_heartbeat(self):
         def heartbeat_loop():
@@ -261,10 +280,48 @@ class RaftNode:
         
         self._save_state()
 
+    def sync_with_leader(self):
+        """Sync state with current leader when node comes back online"""
+        for peer_host, peer_port in self.peers:
+            try:
+                # Check if peer is leader
+                status_resp = requests.get(f'http://{peer_host}:{peer_port}/status', timeout=2)
+                if status_resp.status_code == 200:
+                    peer_status = status_resp.json()
+                    if peer_status.get('role') == 'leader':
+                        # Get state from leader
+                        state_resp = requests.get(f'http://{peer_host}:{peer_port}/state', timeout=2)
+                        if state_resp.status_code == 200:
+                            leader_state = state_resp.json()
+                            # Update local state with leader's data
+                            self.printers = leader_state.get('printers', {})
+                            self.filaments = leader_state.get('filaments', {})
+                            self.jobs = leader_state.get('jobs', {})
+                            self._save_state()
+                            print(f"[{self.node_id}] 🔄 Successfully synced state with leader at {peer_host}:{peer_port}")
+                            return True
+            except Exception as e:
+                print(f"[{self.node_id}] ❌ Failed to sync with potential leader {peer_host}:{peer_port}: {str(e)}")
+                continue
+        return False
+
     def _run_peer_discovery(self):
+        """Run peer discovery and state sync loop"""
+        prev_peers = set()
         while True:
             try:
-                self.peers = self._get_alive_peers()
+                current_peers = self._get_alive_peers()
+                current_peers_set = {tuple(peer) for peer in current_peers}
+                
+                # If we have new peers and we're not the leader, try to sync state
+                if current_peers_set != prev_peers and self.role != 'leader':
+                    # Only sync if we have more peers than before (likely coming back online)
+                    if len(current_peers_set) > len(prev_peers):
+                        print(f"[{self.node_id}] 📡 New peers detected, attempting to sync state with leader")
+                        self.sync_with_leader()
+                
+                prev_peers = current_peers_set
+                self.peers = current_peers
                 print(f"[{self.node_id}] 📡 Updated peers list: {self.peers}")
             except Exception as e:
                 print(f"[{self.node_id}] ❌ Error updating peers: {str(e)}")
