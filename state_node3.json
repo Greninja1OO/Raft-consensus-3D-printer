@@ -1,8 +1,12 @@
 {
-    "term": 1,
-    "voted_for": null,
+    "term": 3,
+    "voted_for": "node3",
     "printers": {
         "p10": {
+            "company": "Prusa",
+            "model": "Mini+"
+        },
+        "p13": {
             "company": "Prusa",
             "model": "Mini+"
         }
