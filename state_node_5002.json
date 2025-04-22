@@ -1,0 +1,67 @@
+{
+    "term": 10,
+    "voted_for": null,
+    "printers": {
+        "P90": {
+            "company": "A",
+            "model": "C",
+            "status": "Available"
+        },
+        "p1": {
+            "company": "c1",
+            "model": "m1",
+            "status": "Available"
+        },
+        "p89": {
+            "company": "abc",
+            "model": "vb",
+            "status": "Available"
+        }
+    },
+    "filaments": {
+        "F3": {
+            "color": "RGB",
+            "remaining_weight": 3996.0,
+            "total_weight": 4996.0,
+            "type": "PLA"
+        },
+        "R": {
+            "color": "Yellow",
+            "remaining_weight": 1234.0,
+            "total_weight": 1234.0,
+            "type": "PLA"
+        },
+        "f11": {
+            "color": "blue",
+            "remaining_weight": 1000.0,
+            "total_weight": 1000.0,
+            "type": "PLA"
+        },
+        "f2": {
+            "color": "red",
+            "remaining_weight": 1107.0,
+            "total_weight": 1230.0,
+            "type": "PLA"
+        }
+    },
+    "jobs": {
+        "J9": {
+            "completed_at": 1745327892.1336918,
+            "created_at": 1745327888.4336782,
+            "filament_id": "F3",
+            "filepath": "ABC",
+            "print_weight_in_grams": 1000.0,
+            "printer_id": "P90",
+            "status": "Done"
+        },
+        "j8": {
+            "completed_at": 1745295991.9913669,
+            "created_at": 1745293287.879006,
+            "filament_id": "f2",
+            "filepath": "asdc",
+            "print_weight_in_grams": 123.0,
+            "printer_id": "p89",
+            "status": "Done"
+        }
+    }
+}
