@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+
+{% block title %}Print Jobs{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col">
+        <h2>Print Jobs</h2>
+    </div>
+    <div class="col text-end">
+        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addJobModal">
+            <i class="fas fa-plus me-2"></i>Add Job
+        </button>
+    </div>
+</div>
+
+<!-- Jobs List -->
+<div class="card">
+    <div class="card-body">
+        {% if jobs %}
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Printer</th>
+                            <th>Filament</th>
+                            <th>Weight</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for job in jobs %}
+                        <tr>
+                            <td>{{ job.id }}</td>
+                            <td>{{ job.printer_id }}</td>
+                            <td>{{ job.filament_id }}</td>
+                            <td>{{ job.print_weight_in_grams }}g</td>
+                            <td>
+                                {% if job.status == 'Running' %}
+                                    <span class="badge bg-primary">{{ job.status }}</span>
+                                {% elif job.status == 'Done' %}
+                                    <span class="badge bg-success">{{ job.status }}</span>
+                                {% elif job.status == 'Cancelled' %}
+                                    <span class="badge bg-danger">{{ job.status }}</span>
+                                {% else %}
+                                    <span class="badge bg-secondary">{{ job.status }}</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if job.status in ['Queued', 'Running'] %}
+                                    <div class="btn-group">
+                                        {% if job.status == 'Queued' %}
+                                            <form action="{{ url_for('update_job_status') }}" method="POST" class="d-inline">
+                                                <input type="hidden" name="job_id" value="{{ job.id }}">
+                                                <input type="hidden" name="status" value="Running">
+                                                <button type="submit" class="btn btn-sm btn-success" title="Start Job">
+                                                    <i class="fas fa-play"></i>
+                                                </button>
+                                            </form>
+                                        {% endif %}
+                                        {% if job.status == 'Running' %}
+                                            <form action="{{ url_for('update_job_status') }}" method="POST" class="d-inline">
+                                                <input type="hidden" name="job_id" value="{{ job.id }}">
+                                                <input type="hidden" name="status" value="Done">
+                                                <button type="submit" class="btn btn-sm btn-success" title="Mark as Done">
+                                                    <i class="fas fa-check"></i>
+                                                </button>
+                                            </form>
+                                        {% endif %}
+                                        <form action="{{ url_for('update_job_status') }}" method="POST" class="d-inline">
+                                            <input type="hidden" name="job_id" value="{{ job.id }}">
+                                            <input type="hidden" name="status" value="Cancelled">
+                                            <button type="submit" class="btn btn-sm btn-danger" title="Cancel Job">
+                                                <i class="fas fa-times"></i>
+                                            </button>
+                                        </form>
+                                    </div>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <div class="text-center py-4">
+                <p class="text-muted">No print jobs added yet</p>
+                <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addJobModal">
+                    <i class="fas fa-plus me-2"></i>Add Your First Job
+                </button>
+            </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Add Job Modal -->
+<div class="modal fade" id="addJobModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Add New Print Job</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form action="{{ url_for('add_job') }}" method="POST">
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="job_id" class="form-label">Job ID</label>
+                        <input type="text" class="form-control" id="job_id" name="job_id" required>
+                        <div class="form-text">A unique identifier for the print job</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="printer_id" class="form-label">Printer</label>
+                        <select class="form-select" id="printer_id" name="printer_id" required>
+                            <option value="">Select printer...</option>
+                            {% for printer in printers %}
+                                <option value="{{ printer.id }}">{{ printer.id }} ({{ printer.model }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="filament_id" class="form-label">Filament</label>
+                        <select class="form-select" id="filament_id" name="filament_id" required>
+                            <option value="">Select filament...</option>
+                            {% for filament in filaments %}
+                                <option value="{{ filament.id }}">{{ filament.id }} ({{ filament.type }} - {{ filament.color }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="filepath" class="form-label">G-code File Path</label>
+                        <input type="text" class="form-control" id="filepath" name="filepath" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="print_weight" class="form-label">Print Weight (g)</label>
+                        <input type="number" class="form-control" id="print_weight" name="print_weight" min="0" step="0.1" required>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Add Job</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

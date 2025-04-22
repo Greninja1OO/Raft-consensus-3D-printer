@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+
+{% block title %}Cluster Status{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col">
+        <h2>Cluster Status</h2>
+    </div>
+</div>
+
+<div class="row">
+    <!-- Leader Status -->
+    <div class="col-md-6 mb-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Leader Information</h5>
+            </div>
+            <div class="card-body">
+                {% if status and status.leader %}
+                    <div class="alert alert-success">
+                        <h6><i class="fas fa-crown me-2"></i>Current Leader</h6>
+                        <p class="mb-0">
+                            <strong>Node ID:</strong> {{ status.leader.node_id }}<br>
+                            <strong>Address:</strong> {{ status.leader.host }}:{{ status.leader.port }}
+                        </p>
+                    </div>
+                {% else %}
+                    <div class="alert alert-warning">
+                        <h6><i class="fas fa-exclamation-triangle me-2"></i>No Leader</h6>
+                        <p class="mb-0">The cluster is currently in the process of leader election.</p>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Cluster Health -->
+    <div class="col-md-6 mb-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Cluster Health</h5>
+            </div>
+            <div class="card-body">
+                {% if status %}
+                    {% set total_nodes = status.peers|length %}
+                    {% set active_nodes = status.peers|selectattr('status', 'equalto', 'alive')|list|length %}
+                    {% set health_percentage = (active_nodes / total_nodes * 100)|round %}
+                    
+                    <div class="text-center mb-3">
+                        <div class="display-4 {% if health_percentage > 66 %}text-success{% elif health_percentage > 33 %}text-warning{% else %}text-danger{% endif %}">
+                            {{ health_percentage }}%
+                        </div>
+                        <p class="text-muted">Cluster Health</p>
+                    </div>
+                    
+                    <div class="row text-center">
+                        <div class="col">
+                            <div class="h4">{{ total_nodes }}</div>
+                            <small class="text-muted">Total Nodes</small>
+                        </div>
+                        <div class="col">
+                            <div class="h4">{{ active_nodes }}</div>
+                            <small class="text-muted">Active Nodes</small>
+                        </div>
+                        <div class="col">
+                            <div class="h4">{{ total_nodes - active_nodes }}</div>
+                            <small class="text-muted">Dead Nodes</small>
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="alert alert-danger">
+                        Unable to fetch cluster health information
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Node Details -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Node Details</h5>
+            </div>
+            <div class="card-body">
+                {% if status and status.peers %}
+                    <div class="table-responsive">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>Host</th>
+                                    <th>Port</th>
+                                    <th>Status</th>
+                                    <th>Role</th>
+                                    <th>Last Seen</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for peer in status.peers %}
+                                <tr>
+                                    <td>{{ peer.host }}</td>
+                                    <td>{{ peer.port }}</td>
+                                    <td>
+                                        {% if peer.status == 'alive' %}
+                                            <span class="badge bg-success">Active</span>
+                                        {% else %}
+                                            <span class="badge bg-danger">Dead</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if status.leader and peer.host == status.leader.host and peer.port == status.leader.port %}
+                                            <span class="badge bg-primary">Leader</span>
+                                        {% else %}
+                                            <span class="badge bg-secondary">Follower</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if peer.status == 'alive' %}
+                                            <span class="text-success">Now</span>
+                                        {% else %}
+                                            <span class="text-danger">Offline</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                {% else %}
+                    <div class="alert alert-warning">
+                        No node information available
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Auto-refresh the page every 10 seconds to keep cluster status updated
+    setTimeout(function() {
+        location.reload();
+    }, 10000);
+</script>
+{% endblock %}

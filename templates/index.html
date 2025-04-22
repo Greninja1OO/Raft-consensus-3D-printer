@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col">
+        <h2>Dashboard</h2>
+    </div>
+</div>
+
+<!-- Status Cards -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card bg-primary text-white">
+            <div class="card-body">
+                <h5 class="card-title">Active Jobs</h5>
+                <p class="card-text display-4">{{ active_jobs }}</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card bg-success text-white">
+            <div class="card-body">
+                <h5 class="card-title">Available Printers</h5>
+                <p class="card-text display-4">{{ available_printers }}</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card bg-info text-white">
+            <div class="card-body">
+                <h5 class="card-title">Total Filaments</h5>
+                <p class="card-text display-4">{{ filament_stats.total }}</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card bg-warning text-white">
+            <div class="card-body">
+                <h5 class="card-title">Low Filaments</h5>
+                <p class="card-text display-4">{{ filament_stats.low }}</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Cluster Status -->
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Cluster Status</h5>
+            </div>
+            <div class="card-body">
+                {% if status %}
+                    {% if status.leader %}
+                        <div class="alert alert-success">
+                            <strong>Leader:</strong> {{ status.leader.node_id }} ({{ status.leader.host }}:{{ status.leader.port }})
+                        </div>
+                    {% else %}
+                        <div class="alert alert-warning">No leader elected</div>
+                    {% endif %}
+                    
+                    <h6>Peers:</h6>
+                    <ul class="list-group">
+                    {% for peer in status.peers %}
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            {{ peer.host }}:{{ peer.port }}
+                            {% if peer.status == 'alive' %}
+                                <span class="badge bg-success">Active</span>
+                            {% else %}
+                                <span class="badge bg-danger">Dead</span>
+                            {% endif %}
+                        </li>
+                    {% endfor %}
+                    </ul>
+                {% else %}
+                    <div class="alert alert-danger">Unable to fetch cluster status</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- Recent Jobs -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Recent Jobs</h5>
+            </div>
+            <div class="card-body">
+                {% if jobs %}
+                    <div class="list-group">
+                    {% for job in jobs[:5] %}
+                        <div class="list-group-item">
+                            <div class="d-flex w-100 justify-content-between">
+                                <h6 class="mb-1">{{ job.id }}</h6>
+                                <small>
+                                    {% if job.status == 'Running' %}
+                                        <span class="badge bg-primary">{{ job.status }}</span>
+                                    {% elif job.status == 'Done' %}
+                                        <span class="badge bg-success">{{ job.status }}</span>
+                                    {% elif job.status == 'Cancelled' %}
+                                        <span class="badge bg-danger">{{ job.status }}</span>
+                                    {% else %}
+                                        <span class="badge bg-secondary">{{ job.status }}</span>
+                                    {% endif %}
+                                </small>
+                            </div>
+                            <p class="mb-1">Printer: {{ job.printer_id }}</p>
+                            <small>Weight: {{ job.print_weight_in_grams }}g</small>
+                        </div>
+                    {% endfor %}
+                    </div>
+                {% else %}
+                    <p class="text-muted">No jobs found</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Printer Status -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Printer Status</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Model</th>
+                                <th>Company</th>
+                                <th>Current Job</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for printer in printers %}
+                            <tr>
+                                <td>{{ printer.id }}</td>
+                                <td>{{ printer.model }}</td>
+                                <td>{{ printer.company }}</td>
+                                <td>
+                                    {% set current_job = None %}
+                                    {% for job in jobs %}
+                                        {% if job.printer_id == printer.id and job.status == 'Running' %}
+                                            {% set current_job = job %}
+                                        {% endif %}
+                                    {% endfor %}
+                                    
+                                    {% if current_job %}
+                                        {{ current_job.id }}
+                                    {% else %}
+                                        <span class="text-muted">No active job</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if current_job %}
+                                        <span class="badge bg-primary">Busy</span>
+                                    {% else %}
+                                        <span class="badge bg-success">Available</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
